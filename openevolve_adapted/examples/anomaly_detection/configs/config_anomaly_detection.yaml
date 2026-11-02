@@ -1,0 +1,73 @@
+variables:
+  core_parameters:
+    data_split: search
+    score: pooled_pointwise_f1
+  PROBLEM_TYPE: "anomaly_detection"
+  MAX_RUNTIME: 120
+  score_transform:
+    score_range_min: 0.0
+    score_range_max: 1.0
+    alpha: 1.0
+    optimize_mode: "maximize"
+    positive_multiplier: 1.0
+
+checkpoint_interval: 10
+max_code_length: 50000
+log_level: "INFO"
+
+llm:
+  models:
+    - name: "google/gemini-2.5-flash-lite"
+      weight: 0.8
+    - name: "google/gemini-2.5-pro"
+      weight: 0.2
+  api_base: "https://openrouter.ai/api/v1"
+  api_key: "EMPTY"
+  temperature: 0.7
+  top_p: 0.95
+  max_tokens: 16384
+  timeout: 600
+  retries: 3
+  retry_delay: 5
+
+prompt:
+  use_alphaevolve_style: true
+  use_system_prompt: false
+  use_system_message_sampling: false
+  system_message_list:
+    - message: |
+        Improve the detect_anomalies function in the candidate program. It receives a KPI's forecast errors and missing-point mask and returns one binary anomaly flag per point. Optimize pooled pointwise F1 across the search KPIs. Missing points are excluded from scoring. The verifier loads labels independently; do not change the saved-result format or read held-out data.
+      weight: 1.0
+  num_top_programs: 0
+  num_diverse_programs: 0
+  num_inspiration_programs: 0
+  use_template_stochasticity: true
+  include_artifacts: true
+  max_artifact_bytes: 16384
+  artifact_security_filter: true
+
+database:
+  population_size: 1000
+  archive_size: 100
+  num_islands: 4
+  feature_dimensions:
+    - "score"
+    - "complexity"
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.6
+  log_prompts: true
+
+evaluator:
+  timeout: 150
+  max_retries: 1
+  cascade_evaluation: false
+  parallel_evaluations: 1
+  use_llm_feedback: false
+  enable_artifacts: true
+  collect_runtime_environments: true
+  preserve_temp_directories: false
+  runtime_environment_patterns:
+    - "*"
+
+diff_based_evolution: true
+allow_full_rewrites: false
