@@ -19,6 +19,20 @@ from openevolve.database import Program, ProgramDatabase
 logger = logging.getLogger(__name__)
 
 
+def has_reached_target_score(metrics: Dict[str, Any], target_score: float) -> bool:
+    """Check the primary combined score, falling back to numeric average for legacy evaluators."""
+    if "combined_score" in metrics:
+        score = metrics["combined_score"]
+    else:
+        numeric_metrics = [
+            value
+            for value in metrics.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        score = sum(numeric_metrics) / len(numeric_metrics) if numeric_metrics else None
+    return score is not None and score >= target_score
+
+
 @dataclass
 class SerializableResult:
     """Result that can be pickled and sent between processes"""
@@ -519,18 +533,15 @@ class ProcessParallelController:
                             checkpoint_callback(completed_iteration)
                     
                     # Check target score
-                    if target_score is not None and child_program.metrics:
-                        numeric_metrics = [
-                            v for v in child_program.metrics.values()
-                            if isinstance(v, (int, float))
-                        ]
-                        if numeric_metrics:
-                            avg_score = sum(numeric_metrics) / len(numeric_metrics)
-                            if avg_score >= target_score:
-                                logger.info(
-                                    f"Target score {target_score} reached at iteration {completed_iteration}"
-                                )
-                                break
+                    if target_score is not None and has_reached_target_score(
+                        child_program.metrics, target_score
+                    ):
+                        logger.info(
+                            f"Target score {target_score} reached at iteration {completed_iteration}"
+                        )
+                        for pending_future in pending_futures.values():
+                            pending_future.cancel()
+                        break
                 
             except Exception as e:
                 logger.error(f"Error processing result from iteration {completed_iteration}: {e}")

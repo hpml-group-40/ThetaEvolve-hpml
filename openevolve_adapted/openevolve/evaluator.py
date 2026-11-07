@@ -143,28 +143,47 @@ class Evaluator:
             else:
                 logger.warning(f"Debug: ❌ Folder {folder} not found at {source_path}")
         
-        # Copy individual files
-        for file in self.config.copy_files:
-            source_path = os.path.join(eval_dir, file)
-            target_path = os.path.join(temp_dir, file)
-            
-            logger.info(f"Debug: Attempting to copy file '{file}'")
-            logger.info(f"Debug:   Source: {source_path}")
-            logger.info(f"Debug:   Target: {target_path}")
-            
-            if os.path.exists(source_path) and os.path.isfile(source_path):
+        # Copy individual files, optionally mapping source paths to workspace-relative destinations.
+        for file_entry in self.config.copy_files:
+            mappings = (
+                file_entry.items()
+                if isinstance(file_entry, dict)
+                else [(file_entry, file_entry)]
+            )
+            for source, destination in mappings:
+                if not isinstance(source, str) or not isinstance(destination, str):
+                    logger.warning(
+                        "Skipping copy_files entry with non-string source or destination"
+                    )
+                    continue
+
+                source_path = os.path.abspath(os.path.join(eval_dir, source))
+                if os.path.isabs(destination):
+                    logger.warning(f"Skipping absolute copy destination: {destination}")
+                    continue
+
+                target_path = os.path.abspath(os.path.join(temp_dir, destination))
+                workspace_root = os.path.realpath(temp_dir)
+                resolved_target = os.path.realpath(target_path)
                 try:
-                    # Create target directory if it doesn't exist
-                    target_dir = os.path.dirname(target_path)
-                    if target_dir:
-                        os.makedirs(target_dir, exist_ok=True)
-                    
-                    shutil.copy2(source_path, target_path)
-                    logger.info(f"Debug: ✅ Successfully copied file {file}")
-                except Exception as e:
-                    logger.warning(f"Debug: ❌ Failed to copy file {file}: {e}")
-            else:
-                logger.warning(f"Debug: ❌ File {file} not found at {source_path}")
+                    target_is_contained = os.path.commonpath(
+                        [workspace_root, resolved_target]
+                    ) == workspace_root
+                except ValueError:
+                    target_is_contained = False
+                if not target_is_contained or resolved_target == workspace_root:
+                    logger.warning(f"Skipping copy destination outside workspace: {destination}")
+                    continue
+
+                logger.debug(f"Copying evaluation file {source_path} to {target_path}")
+                if os.path.isfile(source_path):
+                    try:
+                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        shutil.copy2(source_path, target_path)
+                    except Exception as error:
+                        logger.warning(f"Failed to copy evaluation file {source}: {error}")
+                else:
+                    logger.warning(f"Evaluation file not found: {source_path}")
         
         # # Final verification - list everything in temp_dir
         # logger.info(f"Debug: Final verification - contents of temp directory {temp_dir}:")

@@ -237,7 +237,9 @@ class EvaluatorConfig:
 
     # File copying for evaluation
     copy_folders: List[str] = field(default_factory=list)  # Folders to copy to temp directory
-    copy_files: List[str] = field(default_factory=list)    # Individual files to copy to temp directory
+    copy_files: List[Union[str, Dict[str, str]]] = field(
+        default_factory=list
+    )  # Files to copy, optionally mapped to a destination
     
     # Runtime environment collection
     collect_runtime_environments: bool = True  # Whether to collect runtime environment from temp directories

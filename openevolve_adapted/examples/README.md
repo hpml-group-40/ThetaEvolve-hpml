@@ -5,6 +5,7 @@ Collection of optimization problem domains for evolutionary algorithm experiment
 ## Available Problems
 
 - **circle_packing_modular**: Circle packing optimization
+- **anomaly_detection**: Search-split anomaly detection with pooled F1 ([workflow and provider setup](anomaly_detection/README.md))
 - **first_autocorr_inequality**: First autocorrelation inequality
 - **second_autocorr_inequality**: Second autocorrelation inequality
 - **third_autocorr_inequality**: Third autocorrelation inequality
@@ -73,4 +74,4 @@ Test a problem standalone using `run_init_example.sh`:
 bash run_init_example.sh
 ```
 
-This validates evaluator setup, scoring logic, and evolution without training.
+This validates one evaluator call and scoring only; it does not start the evolution loop.

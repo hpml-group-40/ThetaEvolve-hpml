@@ -17,7 +17,7 @@ from openevolve.database import Program, ProgramDatabase
 from openevolve.evaluator import Evaluator
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.prompt.sampler import PromptSampler
-from openevolve.process_parallel import ProcessParallelController
+from openevolve.process_parallel import ProcessParallelController, has_reached_target_score
 from openevolve.utils.code_utils import (
     extract_code_language,
 )
@@ -292,6 +292,17 @@ class OpenEvolve:
                 f"Skipping initial program addition (resuming from iteration {start_iteration} "
                 f"with {len(self.database.programs)} existing programs)"
             )
+
+        best_before_evolution = self.database.get_best_program(metric="combined_score")
+        if (
+            target_score is not None
+            and best_before_evolution
+            and has_reached_target_score(best_before_evolution.metrics, target_score)
+        ):
+            logger.info(
+                f"Target pooled score {target_score} already reached; skipping evolution"
+            )
+            max_iterations = 0
 
         # Initialize improved parallel processing
         try:

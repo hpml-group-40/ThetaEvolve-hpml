@@ -1,6 +1,7 @@
 """Baseline candidate for anomaly detection."""
 
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -13,15 +14,30 @@ def detect_anomalies(error: np.ndarray, missing: np.ndarray) -> np.ndarray:
 		raise ValueError("KPI has no non-missing errors")
 
 	threshold = 3 * np.sqrt(np.mean(valid_errors**2))
-	return np.abs(error) > threshold
+	return (~missing) & (np.abs(error) > threshold)
 
 
 # EVOLVE-BLOCK-END
 
 
+def resolve_search_path(program_file: Optional[Path] = None) -> Path:
+	"""Find search features in the candidate workspace or source example."""
+	program_dir = Path(program_file or __file__).resolve().parent
+	candidates = (
+		program_dir / "data" / "kpi_search.npz",
+		program_dir.parent / "data" / "kpi_search.npz",
+	)
+	for candidate in candidates:
+		if candidate.is_file():
+			return candidate
+	raise FileNotFoundError(
+		"Could not find kpi_search.npz in the candidate workspace or source example: "
+		+ ", ".join(str(candidate) for candidate in candidates)
+	)
+
+
 def main() -> None:
-	data_dir = Path(__file__).resolve().parents[1] / "data"
-	search_path = data_dir / "kpi_search.npz"
+	search_path = resolve_search_path()
 	predictions = {}
 
 	with np.load(search_path, allow_pickle=False) as search:
