@@ -18,6 +18,7 @@ from openevolve.evaluator import Evaluator
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.process_parallel import ProcessParallelController, has_reached_target_score
+from openevolve.utils.trace_utils import record_target_reached, trace_span, traced
 from openevolve.utils.code_utils import (
     extract_code_language,
 )
@@ -258,9 +259,10 @@ class OpenEvolve:
             initial_program_id = str(uuid.uuid4())
 
             # Evaluate the initial program
-            initial_metrics = await self.evaluator.evaluate_program(
-                self.initial_program_code, initial_program_id
-            )
+            with trace_span("initial_evaluation"):
+                initial_metrics = await self.evaluator.evaluate_program(
+                    self.initial_program_code, initial_program_id
+                )
 
             initial_program = Program(
                 id=initial_program_id,
@@ -302,6 +304,7 @@ class OpenEvolve:
             logger.info(
                 f"Target pooled score {target_score} already reached; skipping evolution"
             )
+            record_target_reached(0, best_before_evolution.metrics.get("combined_score"))
             max_iterations = 0
 
         # Initialize improved parallel processing
@@ -475,6 +478,7 @@ class OpenEvolve:
         self.iteration_programs[iteration] = program_id
         logger.debug(f"📝 Set iteration {iteration} -> program {program_id}")
 
+    @traced("checkpoint_save")
     def _save_checkpoint(self, iteration: int) -> None:
         """Save a checkpoint at the current iteration."""
         import json

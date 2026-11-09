@@ -1,5 +1,8 @@
 # Anomaly Detection
 
+For a one-NVIDIA-GPU vLLM setup, optional Perfetto CPU/GPU traces, and commands
+for local checks and later GPU runs, see [single_gpu/README.md](single_gpu/README.md).
+
 This example evolves a detector against pooled pointwise F1 on the search split. The verifier applies the missing-point masks and loads labels independently. Held-out data is not used during evolution.
 
 ## One-Shot Evaluator Check

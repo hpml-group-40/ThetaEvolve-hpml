@@ -1,0 +1,5 @@
+# Install in a fresh Linux CUDA environment, not the repository's SLIME environment.
+# Keep the version fixed: the launch flags and profiler API below target this release.
+vllm==0.11.0
+transformers==4.57.1
+openai==2.6.1

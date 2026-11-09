@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
+from openevolve.utils.trace_utils import record_target_reached, trace_span, traced
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ def _lazy_init_worker_components():
         )
 
 
+@traced("iteration")
 def _run_iteration_worker(
     iteration: int,
     db_snapshot: Dict[str, Any],
@@ -182,28 +184,30 @@ def _run_iteration_worker(
         include_inspiration_artifacts = _worker_config.prompt.include_artifacts_for_all_programs or _worker_config.prompt.include_inspiration_artifacts
         
         # Build prompt
-        prompt = _worker_prompt_sampler.build_prompt(
-            current_program=parent.code,
-            parent_program=parent.code,
-            program_metrics=parent.metrics,
-            previous_programs=enhance_programs_with_artifacts(island_previous_programs, include_top_artifacts),
-            top_programs=enhance_programs_with_artifacts(island_top_programs, include_top_artifacts),
-            inspirations=enhance_programs_with_artifacts(inspirations, include_inspiration_artifacts),
-            language=_worker_config.language,
-            evolution_round=iteration,
-            diff_based_evolution=_worker_config.diff_based_evolution,
-            program_artifacts=parent_artifacts,
-        )
+        with trace_span("prompt_build", iteration=iteration):
+            prompt = _worker_prompt_sampler.build_prompt(
+                current_program=parent.code,
+                parent_program=parent.code,
+                program_metrics=parent.metrics,
+                previous_programs=enhance_programs_with_artifacts(island_previous_programs, include_top_artifacts),
+                top_programs=enhance_programs_with_artifacts(island_top_programs, include_top_artifacts),
+                inspirations=enhance_programs_with_artifacts(inspirations, include_inspiration_artifacts),
+                language=_worker_config.language,
+                evolution_round=iteration,
+                diff_based_evolution=_worker_config.diff_based_evolution,
+                program_artifacts=parent_artifacts,
+            )
         
         iteration_start = time.time()
         
         # Generate code modification (sync wrapper for async)
-        llm_response = asyncio.run(
-            _worker_llm_ensemble.generate_with_context(
-                system_message=prompt["system"],
-                messages=[{"role": "user", "content": prompt["user"]}],
+        with trace_span("llm_generate", iteration=iteration):
+            llm_response = asyncio.run(
+                _worker_llm_ensemble.generate_with_context(
+                    system_message=prompt["system"],
+                    messages=[{"role": "user", "content": prompt["user"]}],
+                )
             )
-        )
         
         # Parse response based on evolution mode
         if _worker_config.diff_based_evolution:
@@ -216,7 +220,8 @@ def _run_iteration_worker(
                     iteration=iteration
                 )
             
-            child_code = apply_diff(parent.code, llm_response)
+            with trace_span("diff_apply", iteration=iteration):
+                child_code = apply_diff(parent.code, llm_response)
             changes_summary = format_diff_summary(diff_blocks)
         else:
             from openevolve.utils.code_utils import parse_full_rewrite
@@ -241,9 +246,10 @@ def _run_iteration_worker(
         # Evaluate the child program
         import uuid
         child_id = str(uuid.uuid4())
-        child_metrics = asyncio.run(
-            _worker_evaluator.evaluate_program(child_code, child_id)
-        )
+        with trace_span("candidate_evaluation", iteration=iteration, program_id=child_id):
+            child_metrics = asyncio.run(
+                _worker_evaluator.evaluate_program(child_code, child_id)
+            )
         
         # Get artifacts
         artifacts = _worker_evaluator.get_pending_artifacts(child_id)
@@ -453,7 +459,8 @@ class ProcessParallelController:
                     child_program = Program(**result.child_program_dict)
                     
                     # Add to database
-                    self.database.add(child_program, iteration=completed_iteration)
+                    with trace_span("database_update", iteration=completed_iteration):
+                        self.database.add(child_program, iteration=completed_iteration)
                     
                     # Store artifacts
                     if result.artifacts:
@@ -536,6 +543,7 @@ class ProcessParallelController:
                     if target_score is not None and has_reached_target_score(
                         child_program.metrics, target_score
                     ):
+                        record_target_reached(completed_iteration, child_program.metrics.get("combined_score"))
                         logger.info(
                             f"Target score {target_score} reached at iteration {completed_iteration}"
                         )
@@ -569,10 +577,12 @@ class ProcessParallelController:
         """Submit an iteration to the process pool"""
         try:
             # Sample parent and inspirations
-            parent, inspirations = self.database.sample(self.config.prompt.num_inspiration_programs)
+            with trace_span("parent_selection", iteration=iteration):
+                parent, inspirations = self.database.sample(self.config.prompt.num_inspiration_programs)
             
             # Create database snapshot
-            db_snapshot = self._create_database_snapshot()
+            with trace_span("database_snapshot", iteration=iteration):
+                db_snapshot = self._create_database_snapshot()
             
             # Submit to process pool
             future = self.executor.submit(
