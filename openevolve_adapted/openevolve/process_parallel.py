@@ -82,6 +82,12 @@ def _worker_init(config_dict: dict, evaluation_file: str) -> None:
         **{k: v for k, v in config_dict.items() 
            if k not in ['llm', 'prompt', 'database', 'evaluator']}
     )
+    # Worker processes have their own Python/NumPy random generators.
+    if _worker_config.random_seed is not None:
+        import random
+        import numpy as np
+        random.seed(_worker_config.random_seed)
+        np.random.seed(_worker_config.random_seed)
     _worker_evaluation_file = evaluation_file
     
     # These will be lazily initialized on first use
@@ -215,6 +221,7 @@ def _run_iteration_worker(
             
             diff_blocks = extract_diffs(llm_response)
             if not diff_blocks:
+                logger.warning("Unparseable LLM edit (raw response): %r", llm_response)
                 return SerializableResult(
                     error=f"No valid diffs found in response",
                     iteration=iteration

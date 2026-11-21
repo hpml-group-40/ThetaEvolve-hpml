@@ -29,6 +29,7 @@ def resolved_config(args):
         api_base=args.api_base, api_key="EMPTY", max_tokens=4096, retries=0,
     )
     config["database"]["num_islands"] = 1
+    config["database"]["random_seed"] = args.seed
     config["evaluator"]["parallel_evaluations"] = 1
     # The resolved YAML lives in outputs/, so resolve staging paths explicitly.
     config["evaluator"]["copy_files"] = [

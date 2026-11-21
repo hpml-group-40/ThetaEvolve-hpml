@@ -351,6 +351,10 @@ class OpenEvolve:
         finally:
             # Clean up parallel processing resources
             if self.parallel_controller:
+                # Persist accepted results before waiting for in-flight workers.
+                # The timed launcher may force-kill workers after 20 seconds.
+                if self.parallel_controller.shutdown_event.is_set():
+                    self._save_best_program()
                 self.parallel_controller.stop()
                 self.parallel_controller = None
             
