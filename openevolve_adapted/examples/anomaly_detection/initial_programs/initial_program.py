@@ -8,12 +8,12 @@ import numpy as np
 
 # EVOLVE-BLOCK-START
 def detect_anomalies(error: np.ndarray, missing: np.ndarray) -> np.ndarray:
-    """Flag errors beyond three times the non-missing RMS error."""
+    """Flag errors larger than the non-missing RMS error."""
     valid_errors = error[~missing]
     if valid_errors.size == 0:
         raise ValueError("KPI has no non-missing errors")
 
-    threshold = 3 * np.sqrt(np.mean(valid_errors**2))
+    threshold = 1 * np.sqrt(np.mean(valid_errors**2))
     return (~missing) & (np.abs(error) > threshold)
 
 

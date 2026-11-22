@@ -82,7 +82,7 @@ class RequestSeedTests(unittest.TestCase):
         return seeds, evaluated, results
 
     def test_same_prompt_gets_a_new_seed_each_iteration(self):
-        old = 'threshold = 3 * np.sqrt(np.mean(valid_errors**2))'
+        old = 'threshold = 1 * np.sqrt(np.mean(valid_errors**2))'
         edit = f'<<<<<<< SEARCH\n    {old}\n=======\n    threshold = 4 * np.std(valid_errors)\n>>>>>>> REPLACE'
         seeds, evaluated, results = self.run_iterations(42, [edit, edit, edit])
         self.assertEqual(len(set(seeds)), 3)

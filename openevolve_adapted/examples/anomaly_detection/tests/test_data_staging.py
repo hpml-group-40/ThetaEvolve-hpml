@@ -122,7 +122,7 @@ class CandidateDataResolutionTests(unittest.TestCase):
             )
 
         self.assertEqual(metrics.get("validity"), 1.0)
-        self.assertAlmostEqual(metrics["combined_score"], 0.5412038233014724)
+        self.assertAlmostEqual(metrics["combined_score"], 0.10084062097484915)
 
 
 if __name__ == "__main__":
