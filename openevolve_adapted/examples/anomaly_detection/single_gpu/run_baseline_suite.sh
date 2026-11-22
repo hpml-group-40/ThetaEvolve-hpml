@@ -3,7 +3,8 @@
 # Starts the baseline vLLM server, runs the measured seeds, then one diagnostic
 # kernel-profile run against a profiler-enabled server (excluded from timing).
 # Environment: HPML_BUDGET (seconds per seed, default 900), HPML_SEEDS ("42 43 44"),
-# HPML_MODEL, HPML_REVISION, HPML_SKIP_PROFILE=1 to skip the diagnostic run.
+# HPML_MODEL, HPML_REVISION, HPML_SKIP_PROFILE=1 to skip the diagnostic run,
+# HPML_TARGET_F1 (search F1 whose first crossing is reported as time to target).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -71,8 +72,8 @@ done
 curl -sf "http://127.0.0.1:$PORT/metrics" > "$SUITE/server_metrics_final.txt" || true
 stop_server
 
-python - "$SUITE" "$BUDGET" $SEEDS <<'PY'
-import csv, json, statistics, sys
+HPML_TARGET_F1="${HPML_TARGET_F1:-}" python - "$SUITE" "$BUDGET" $SEEDS <<'PY'
+import csv, json, os, statistics, sys
 from pathlib import Path
 p=Path(sys.argv[1]); budget=int(sys.argv[2]); seeds=[int(s) for s in sys.argv[3:]]; rows=[]; curves={}
 for seed in seeds:
@@ -97,12 +98,16 @@ for seed in seeds:
                  'mean_gpu_utilization_percent':(t.get('gpu') or {}).get('mean_utilization_percent'),
                  'peak_gpu_memory_mib':(t.get('gpu') or {}).get('peak_memory_used_mib')})
 scores=[r['search_f1'] for r in rows]
-# Target for later comparisons: the median best search F1 across the seeds.
-target=statistics.median(scores)
+# Time to target: a target fixed in advance, else the median best search F1 across the seeds.
+target=float(os.environ['HPML_TARGET_F1']) if os.environ.get('HPML_TARGET_F1') else statistics.median(scores)
 for r in rows:
-    r['seconds_to_median_best_f1']=next((c['elapsed_seconds'] for c in curves[r['seed']] if c['best_f1']>=target),None)
+    r['seconds_to_target_f1']=next((c['elapsed_seconds'] for c in curves[r['seed']] if c['best_f1']>=target),None)
+reached=[r['seconds_to_target_f1'] for r in rows if r['seconds_to_target_f1'] is not None]
 summary={'budget_seconds_per_seed':budget,'seeds':seeds,'results':rows,'mean_search_f1':statistics.mean(scores),
-         'median_best_search_f1_target':target,
+         'target_search_f1':target,'target_fixed_in_advance':bool(os.environ.get('HPML_TARGET_F1')),
+         'seeds_reaching_target':len(reached),
+         'median_seconds_to_target_counting_misses_as_budget':statistics.median(
+             [r['seconds_to_target_f1'] if r['seconds_to_target_f1'] is not None else budget for r in rows]),
          'sample_std_search_f1':statistics.stdev(scores) if len(scores)>1 else None,
          'server_startup':json.loads((p/'server.startup.json').read_text()),'heldout_evaluated':False}
 (p/'baseline_summary.json').write_text(json.dumps(summary,indent=2))
