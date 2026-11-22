@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
-from openevolve.utils.trace_utils import record_target_reached, trace_span, traced
+from openevolve.utils.trace_utils import derive_seed, record_target_reached, trace_span, traced
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +140,14 @@ def _run_iteration_worker(
     try:
         # Lazy initialization
         _lazy_init_worker_components()
+
+        # Worker-side randomness depends on (run seed, iteration) only, not on
+        # which worker process happens to pick the iteration up.
+        if _worker_config.random_seed is not None:
+            import random
+            import numpy as np
+            random.seed(derive_seed(_worker_config.random_seed, "worker", iteration))
+            np.random.seed(derive_seed(_worker_config.random_seed, "worker", iteration))
         
         # Reconstruct programs from snapshot
         programs = {
@@ -207,11 +215,16 @@ def _run_iteration_worker(
         iteration_start = time.time()
         
         # Generate code modification (sync wrapper for async)
-        with trace_span("llm_generate", iteration=iteration):
+        # A single fixed request seed makes the server return the identical reply
+        # every time a parent is re-sampled (the prompt is unchanged), so the
+        # sampling seed must differ per iteration while staying reproducible.
+        request_seed = derive_seed(_worker_config.random_seed, "llm", iteration)
+        with trace_span("llm_generate", iteration=iteration, seed=request_seed):
             llm_response = asyncio.run(
                 _worker_llm_ensemble.generate_with_context(
                     system_message=prompt["system"],
                     messages=[{"role": "user", "content": prompt["user"]}],
+                    **({} if request_seed is None else {"seed": request_seed}),
                 )
             )
         
@@ -230,6 +243,14 @@ def _run_iteration_worker(
             with trace_span("diff_apply", iteration=iteration):
                 child_code = apply_diff(parent.code, llm_response)
             changes_summary = format_diff_summary(diff_blocks)
+            # apply_diff skips SEARCH blocks that do not match. A child identical
+            # to its parent is a failed edit, not a new candidate to grade/store.
+            if child_code == parent.code:
+                logger.warning("LLM edit left the program unchanged (raw response): %r", llm_response)
+                return SerializableResult(
+                    error="Diff did not change the program (SEARCH text unmatched or no-op edit)",
+                    iteration=iteration
+                )
         else:
             from openevolve.utils.code_utils import parse_full_rewrite
             

@@ -1,5 +1,6 @@
 """Opt-in CPU spans and local vLLM GPU profiling; no torch dependency in the client."""
 
+import hashlib
 import json
 import logging
 import os
@@ -23,14 +24,15 @@ def trace_span(name, **fields):
     """
     directory = os.environ.get("HPML_TRACE_DIR")
     if not directory:
-        yield
+        yield fields
         return
     timestamp_us = time.time_ns() / 1000
     start_ns = time.perf_counter_ns()
     try:
-        yield
+        # Callers may add result fields (e.g. token counts) to the yielded dict.
+        yield fields
     except BaseException as error:
-        fields = dict(fields, error=type(error).__name__)
+        fields["error"] = type(error).__name__
         raise
     finally:
         event = {
@@ -85,6 +87,9 @@ def merge_traces(directory, destination):
                     raise
                 logger.warning("Ignoring incomplete last event in %s", path)
     events.sort(key=lambda event: event["ts"])
+    if any(event.get("pid") == 0 for event in events):
+        events.insert(0, {"name": "process_name", "ph": "M", "pid": 0, "tid": 0, "ts": 0,
+                          "args": {"name": "GPU and vLLM counters"}})
     Path(destination).write_text(json.dumps({"traceEvents": events, "displayTimeUnit": "ms"}))
     return events
 
@@ -104,6 +109,17 @@ def record_target_reached(iteration, score):
                 "elapsed_seconds": (time.perf_counter_ns() - int(start)) / 1e9,
             }
             Path(path).write_text(json.dumps(status))
+
+
+def derive_seed(base_seed, *parts):
+    """Stable 31-bit seed for one (run seed, purpose, iteration, ...) combination.
+
+    None stays None so unseeded runs remain unseeded.
+    """
+    if base_seed is None:
+        return None
+    text = ":".join(str(part) for part in (base_seed, *parts))
+    return int(hashlib.md5(text.encode()).hexdigest()[:8], 16) % (2**31)
 
 
 def _profile_endpoint(api_base, endpoint, api_key):
@@ -131,6 +147,10 @@ def profile_vllm_request(api_base, api_key):
     This scope runs *inside* the API thread so stop_profile still happens when
     the outer async wait is cancelled. The single-GPU profile launcher uses one
     worker and also stops the server profiler after a hard client timeout.
+
+    HPML_VLLM_PROFILE_SECONDS (optional) stops the kernel profiler that many
+    seconds into the call. An eager 7B decode emits several hundred CUDA events
+    per token, so an uncapped multi-hundred-token reply is too large for Perfetto.
     """
     if os.environ.get("HPML_VLLM_PROFILE") != "1":
         yield
@@ -150,18 +170,40 @@ def profile_vllm_request(api_base, api_key):
     status = {"status": "starting", "api_base": api_base, "pid": os.getpid()}
     status_path = root / "gpu_profile_status.json"
     started = False
+    stop_lock = threading.Lock()
+    stop_error = []
+
+    def stop_once(reason):
+        with stop_lock:
+            if status.get("stopped") or stop_error:
+                return
+            try:
+                with trace_span("gpu_profiler_stop", reason=reason):
+                    _profile_endpoint(api_base, "stop_profile", api_key)
+                status.update(stopped=True, stop_reason=reason)
+            except BaseException as error:  # re-raised by the request thread below
+                stop_error.append(error)
+
+    window = float(os.environ.get("HPML_VLLM_PROFILE_SECONDS") or 0)
+    timer = None
     try:
         with trace_span("gpu_profiler_start"):
             _profile_endpoint(api_base, "start_profile", api_key)
         started = True
-        status.update(status="recording", started=True, stopped=False)
+        status.update(status="recording", started=True, stopped=False, window_seconds=window or None)
         status_path.write_text(json.dumps(status))
+        if window > 0:
+            timer = threading.Timer(window, stop_once, args=("window_elapsed",))
+            timer.daemon = True
+            timer.start()
         try:
             yield
         finally:
-            with trace_span("gpu_profiler_stop"):
-                _profile_endpoint(api_base, "stop_profile", api_key)
-            status["stopped"] = True
+            if timer:
+                timer.cancel()
+            stop_once("request_finished")
+            if stop_error:
+                raise stop_error[0]
         status["status"] = "complete"
     except BaseException as error:
         status.update(status="error", error=str(error), started=started)

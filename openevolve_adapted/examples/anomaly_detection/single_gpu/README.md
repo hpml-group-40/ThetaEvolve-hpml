@@ -69,7 +69,7 @@ The client checks the served model and warms it up outside the evolution timer. 
 
 Open `loop_trace.json` and the vLLM GPU trace separately in [Perfetto](https://ui.perfetto.dev/). The client trace shows parent selection, database snapshots, prompt building, LLM waiting time, diff application, candidate evaluation, database updates and checkpoints. CUDA kernels appear in the vLLM trace. Do not add nested span durations together or interpret all client waiting time as GPU computation. No prompt text or API keys are added to trace events.
 
-The profiler is enabled only for the first generation call across workers and is stopped in a `finally` block. It can therefore produce a large trace for a 4096-token completion, but does not record an unlimited sequence of generations. The launcher attempts to stop it after a hard client timeout too. If the initial program already reaches the target, no LLM request runs and the launcher reports that a GPU profile was not produced. Use an empty output directory for each run.
+The profiler is enabled only for the first generation call across workers, and is stopped `--profile-seconds` (default 5) into that call or in a `finally` block, whichever comes first. The kernel trace therefore covers prefill and the first decode steps; the whole step is covered by the loop spans and the sampled GPU counters in `loop_trace.json`. The launcher attempts to stop it after a hard client timeout too. If the initial program already reaches the target, no LLM request runs and the launcher reports that a GPU profile was not produced. Use an empty output directory for each run.
 
 Profiling changes latency. **Exclude diagnostic runs from speed comparisons.** If the model returns an invalid diff, the trace can still be valid; verify that the logs also show a successfully scored child before declaring evolution ready.
 
@@ -89,7 +89,7 @@ python examples/anomaly_detection/single_gpu/run.py \
   --seed 42 --output outputs/reference_seed42
 ```
 
-`benchmark` disables both the client trace and GPU profiler controls. The launcher records `time_to_target_seconds` when the controller confirms the target, using the same host's monotonic clock. The clock starts just before the evolution process launches, including client startup and the initial evaluation; model download, server startup, the fixed warmup, cleanup and held-out scoring are excluded. A target observed after the budget is a miss and has a null time to target. `wall_seconds_including_cleanup` is a separate diagnostic value.
+`benchmark` never uses the server-side CUDA kernel profiler. It does record the cheap loop spans and sampled GPU/vLLM counters (`loop_trace.json`, `trace_summary.json`, `traces/gpu_samples.csv`, `traces/vllm_metrics.csv`) unless `--no-trace` is passed; keep that choice the same across compared runs. The launcher records `time_to_target_seconds` when the controller confirms the target, using the same host's monotonic clock. The clock starts just before the evolution process launches, including client startup and the initial evaluation; model download, server startup, the fixed warmup, cleanup and held-out scoring are excluded. A target observed after the budget is a miss and has a null time to target. `wall_seconds_including_cleanup` is a separate diagnostic value.
 
 A deadline gets the same 20-second cleanup allowance as Sonya's launcher, followed by process-group termination if needed. Timeout exit status is 124 even if cleanup exits normally. An iteration ceiling is only a safety limit. The team should keep the model/revision, prompts, data, target, budget, sampling settings and hardware fixed across comparisons, and use the same 2-3 seeds for each setup. Seeds reduce variation; they do not guarantee identical generated code. Use `--revision <model-commit>` in the server launcher to fix the model revision.
 
@@ -118,7 +118,7 @@ These are explicit **starter settings**, not an assertion that every vLLM optimi
 | Chunked prefill | Off | `--no-enable-chunked-prefill`; replace with `--enable-chunked-prefill` |
 | Weight precision | BF16, unquantized | Explicit `--dtype bfloat16`; an FP32 or quantized experiment needs a separately validated server setup |
 | KV precision | BF16 | `--kv-cache-dtype auto` follows this model dtype; FP8 is a separate optimization |
-| KV sizing | 80% GPU-memory allowance; 8192 total tokens | `--gpu-memory-utilization 0.80`, `--max-model-len 8192`; allowance includes model/runtime and is not all KV memory |
+| KV sizing | 90% GPU-memory allowance; 8192 total tokens | `--gpu-memory-utilization 0.90`, `--max-model-len 8192`; allowance includes model/runtime and is not all KV memory |
 | Speculative decoding | Off | No `--speculative-config` is passed |
 | Output/sampling | 4096 tokens, temperature 0.7, top-p 0.95 | Resolved YAML; these are fixed across comparisons |
 | Evolution | Diff edits, population 1000 | Inherited from Sonya's configuration |

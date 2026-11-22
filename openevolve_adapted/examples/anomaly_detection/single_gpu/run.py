@@ -26,11 +26,12 @@ def resolved_config(args):
     config["random_seed"] = args.seed
     config["llm"].update(
         models=[{"name": args.model, "weight": 1.0}],
-        api_base=args.api_base, api_key="EMPTY", max_tokens=4096, retries=0,
+        api_base=args.api_base, api_key="EMPTY", max_tokens=args.max_tokens, retries=0,
     )
     config["database"]["num_islands"] = 1
     config["database"]["random_seed"] = args.seed
-    config["evaluator"]["parallel_evaluations"] = 1
+    # One worker = one request in flight; the worker count is the client batch size.
+    config["evaluator"]["parallel_evaluations"] = args.workers
     # The resolved YAML lives in outputs/, so resolve staging paths explicitly.
     config["evaluator"]["copy_files"] = [
         {str(EXAMPLE_DIR / "data/kpi_search.npz"): "data/kpi_search.npz"}
@@ -82,6 +83,13 @@ def main(argv=None):
     parser.add_argument("--iterations", type=int, help="Defaults to 2 for smoke/profile; high ceiling for benchmark")
     parser.add_argument("--target-f1", type=float, help="Defaults to 1.0 for smoke/profile and 0.85 for benchmark")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--workers", type=int, default=1, help="Loop workers = requests in flight (baseline 1)")
+    parser.add_argument("--max-tokens", type=int, default=4096, help="Reply cap per request")
+    parser.add_argument("--no-trace", action="store_true",
+                        help="Benchmark only: disable loop spans and GPU/vLLM counter sampling")
+    parser.add_argument("--gpu", default="0", help="GPU index sampled by nvidia-smi")
+    parser.add_argument("--profile-seconds", type=float, default=5.0,
+                        help="Profile mode: stop the CUDA kernel profiler this long into the first LLM call (0 = whole call)")
     parser.add_argument("--print-command", action="store_true", help="Print only; no data, server or GPU needed")
     args = parser.parse_args(argv)
     args.api_base = args.api_base.rstrip("/")
@@ -89,6 +97,8 @@ def main(argv=None):
         args.target_f1 = 0.85 if args.mode == "benchmark" else 1.0
     if args.iterations is None:
         args.iterations = 2147483647 if args.mode == "benchmark" else 2
+    if args.workers < 1 or args.max_tokens < 1:
+        parser.error("--workers and --max-tokens must be positive")
     if args.budget_seconds < 1 or args.iterations < 1 or not 0 <= args.target_f1 <= 1:
         parser.error("Budget/iterations must be positive; target F1 must lie in [0, 1]")
     if args.mode == "profile":
@@ -133,15 +143,24 @@ def main(argv=None):
     # Candidate execution invokes python/python3 through PATH. Keep it in the
     # launcher's environment even when run.py was called by an absolute venv path.
     environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", "")
-    for key in ("HPML_TRACE_DIR", "HPML_VLLM_PROFILE"):
+    for key in ("HPML_TRACE_DIR", "HPML_VLLM_PROFILE", "HPML_VLLM_PROFILE_SECONDS"):
         environment.pop(key, None)
     trace_directory = output / "traces"
+    # Loop spans (one file append per span) and nvidia-smi//metrics sampling are
+    # cheap and identical in every measured configuration, so timing runs keep
+    # them. Only the server-side CUDA kernel profiler is restricted to profile mode.
+    tracing = args.mode == "profile" or not args.no_trace
+    if tracing:
+        environment["HPML_TRACE_DIR"] = str(trace_directory)
     if args.mode == "profile":
-        environment.update(HPML_TRACE_DIR=str(trace_directory), HPML_VLLM_PROFILE="1")
+        environment.update(HPML_VLLM_PROFILE="1", HPML_VLLM_PROFILE_SECONDS=str(args.profile_seconds))
     metadata = {
         "mode": args.mode, "seed": args.seed, "target_dev_f1": args.target_f1,
         "budget_seconds": args.budget_seconds, "iterations_ceiling": args.iterations,
         "command": command, "warmup_outside_budget": True,
+        "model": args.model, "api_base": args.api_base, "workers": args.workers,
+        "max_tokens": args.max_tokens, "tracing": tracing,
+        "started_at_utc": datetime.utcnow().isoformat() + "Z",
         "data_sha256": {
             name: hashlib.sha256((EXAMPLE_DIR / "data" / name).read_bytes()).hexdigest()
             for name in ("kpi_search.npz", "kpi_search_labels.npz")
@@ -149,8 +168,17 @@ def main(argv=None):
     }
     environment["HPML_TARGET_STATUS_PATH"] = str(output / "target_status.json")
     environment["HPML_RUN_START_NS"] = str(time.perf_counter_ns())
+    monitor = None
+    if tracing:
+        from gpu_monitor import Monitor
+        monitor = Monitor(trace_directory, gpu=args.gpu,
+                          metrics_url=args.api_base[: -len("/v1")] + "/metrics").start()
     start = time.perf_counter()
-    returncode, reason = wait_for_run(command, environment, args.budget_seconds)
+    try:
+        returncode, reason = wait_for_run(command, environment, args.budget_seconds)
+    finally:
+        if monitor:
+            monitor.stop()
     metadata.update(exit_code=returncode, stop_reason=reason,
                     wall_seconds_including_cleanup=time.perf_counter() - start)
     target_path = output / "target_status.json"
@@ -160,9 +188,18 @@ def main(argv=None):
     metadata["time_to_target_seconds"] = target["elapsed_seconds"] if reached else None
     if reached:
         metadata["stop_reason"] = "target_reached"
-    if args.mode == "profile":
+    if tracing:
         sys.path.insert(0, str(OPENEVOLVE_DIR))
-        from openevolve.utils.trace_utils import _profile_endpoint, merge_traces
+        from openevolve.utils.trace_utils import merge_traces
+        from trace_summary import summarize
+        events = merge_traces(trace_directory, output / "loop_trace.json")
+        metadata["trace_events"] = len(events)
+        (output / "trace_summary.json").write_text(json.dumps(summarize(events), indent=2))
+        if not any(event.get("ph") == "X" for event in events):
+            print("CPU trace is empty; check trace output permissions.", file=sys.stderr)
+            returncode = returncode or 1
+    if args.mode == "profile":
+        from openevolve.utils.trace_utils import _profile_endpoint
         status_path = trace_directory / "gpu_profile_status.json"
         status = json.loads(status_path.read_text()) if status_path.exists() else {}
         # A force-killed client thread cannot execute its finally block.
@@ -171,12 +208,7 @@ def main(argv=None):
                 _profile_endpoint(args.api_base, "stop_profile", "EMPTY")
             except Exception as error:
                 print(f"Profiler cleanup: {error}", file=sys.stderr)
-        events = merge_traces(trace_directory, output / "loop_trace.json")
-        metadata["trace_events"] = len(events)
         metadata["gpu_profile"] = status or {"status": "not_started"}
-        if not events:
-            print("CPU trace is empty; check trace output permissions.", file=sys.stderr)
-            returncode = returncode or 1
         if status.get("status") != "complete":
             print("GPU profile did not complete. Check server profiler settings and whether an LLM call ran.", file=sys.stderr)
             returncode = returncode or 1

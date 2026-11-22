@@ -8,6 +8,7 @@ import platform
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
@@ -28,8 +29,8 @@ def build_launch(args):
         "--kv-cache-dtype", "auto",
         "--max-model-len", str(args.max_model_len),
         "--max-num-batched-tokens", str(args.max_model_len),
-        "--max-num-seqs", "1",
-        "--gpu-memory-utilization", "0.80",
+        "--max-num-seqs", str(args.max_num_seqs),
+        "--gpu-memory-utilization", f"{args.gpu_memory_utilization:.2f}",
         "--no-enable-prefix-caching",
         "--no-enable-chunked-prefill",
         "--enforce-eager",
@@ -63,6 +64,10 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--max-model-len", type=int, default=8192)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-num-seqs", type=int, default=1, help="Server batch limit (baseline 1)")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    parser.add_argument("--launch-record", type=Path,
+                        help="Write the exact command, environment and versions to this JSON file")
     parser.add_argument("--profile-dir", type=Path, help="Enable server profiler endpoints and save GPU traces here")
     parser.add_argument("--print-command", action="store_true", help="Print only; works without CUDA or vLLM")
     args = parser.parse_args(argv)
@@ -86,14 +91,23 @@ def main(argv=None):
     environment.update(overrides)
     if args.profile_dir:
         args.profile_dir.mkdir(parents=True, exist_ok=True)
+    records = [args.profile_dir / "server_launch.json"] if args.profile_dir else []
+    if args.launch_record:
+        args.launch_record.parent.mkdir(parents=True, exist_ok=True)
+        records.append(args.launch_record)
+    if records:
         gpu_info = subprocess.run(
             ["nvidia-smi", "-i", args.gpu, "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        (args.profile_dir / "server_launch.json").write_text(json.dumps({
+        record = json.dumps({
             "command": command, "environment": overrides, "vllm": installed,
             "python": platform.python_version(), "gpu": gpu_info,
-        }, indent=2))
+            "profiler_enabled": bool(args.profile_dir),
+            "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        }, indent=2)
+        for path in records:
+            path.write_text(record)
     return subprocess.call(command, env=environment)
 
 

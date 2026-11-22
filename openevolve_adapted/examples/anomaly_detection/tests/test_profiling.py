@@ -91,6 +91,41 @@ class ProfilingTests(unittest.TestCase):
                 status = json.loads((Path(directory) / "gpu_profile_status.json").read_text())
                 self.assertEqual(status["status"], "error")
 
+    def test_profile_window_stops_the_profiler_once_before_the_call_ends(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            variables = {"HPML_TRACE_DIR": directory, "HPML_VLLM_PROFILE": "1", "HPML_VLLM_PROFILE_SECONDS": "0.05"}
+            with patch.dict(os.environ, variables):
+                with patch("openevolve.utils.trace_utils._profile_endpoint") as endpoint:
+                    with profile_vllm_request("http://localhost:8000/v1", "EMPTY"):
+                        time.sleep(0.3)
+                        self.assertEqual([call.args[1] for call in endpoint.call_args_list], ["start_profile", "stop_profile"])
+                self.assertEqual([call.args[1] for call in endpoint.call_args_list], ["start_profile", "stop_profile"])
+                status = json.loads((Path(directory) / "gpu_profile_status.json").read_text())
+                self.assertEqual((status["status"], status["stop_reason"]), ("complete", "window_elapsed"))
+
+    def test_counters_merge_with_spans_and_summarize_gpu_use(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "single_gpu"))
+        from gpu_monitor import parse_metrics
+        from trace_summary import summarize
+        text = ('# HELP x\nvllm:num_requests_running{model_name="m"} 1.0\n'
+                'vllm:generation_tokens_total{model_name="m"} 250.0\nother_metric 3\n')
+        self.assertEqual(parse_metrics(text), {"requests_running": 1.0, "generation_tokens_total": 250.0})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            span = {"name": "llm_request", "ph": "X", "ts": 1_000_000, "dur": 2_000_000, "pid": 5, "tid": 1,
+                    "args": {"completion_tokens": 40, "prompt_tokens": 10, "finish_reason": "stop"}}
+            outer = dict(span, name="iteration", dur=4_000_000, args={})
+            (root / "client-5.jsonl").write_text(json.dumps(outer) + "\n" + json.dumps(span) + "\n")
+            counters = [{"name": "GPU utilization %", "ph": "C", "ts": ts, "pid": 0, "tid": 0, "args": {"util": util}}
+                        for ts, util in ((2_000_000, 90.0), (4_000_000, 0.0))]
+            (root / "client-gpu-monitor.jsonl").write_text("".join(json.dumps(event) + "\n" for event in counters))
+            summary = summarize(merge_traces(root, root / "loop.json"))
+        self.assertEqual(summary["llm"]["output_tokens_per_second_while_generating"], 20.0)
+        self.assertEqual(summary["gpu"]["mean_utilization_during_llm_requests"], 90.0)
+        self.assertEqual(summary["gpu"]["mean_utilization_outside_llm_requests"], 0.0)
+        self.assertEqual(summary["stages"]["llm_request"]["share_of_wall"], 0.5)
+
     def test_opt_out_makes_no_profiler_calls(self):
         with patch.dict(os.environ, {"HPML_VLLM_PROFILE": "0"}):
             with patch("openevolve.utils.trace_utils._profile_endpoint") as endpoint:

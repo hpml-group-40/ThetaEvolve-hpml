@@ -206,3 +206,7 @@ Nemotron-Research-Reasoning-Qwen-1.5B/
 Results/
 data/
 run.sh
+
+# local virtual environments and VM records
+.venv*/
+vm-setup/
