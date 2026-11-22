@@ -15,8 +15,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
+from openevolve.utils.trace_utils import derive_seed, record_target_reached, trace_span, traced
 
 logger = logging.getLogger(__name__)
+
+
+def has_reached_target_score(metrics: Dict[str, Any], target_score: float) -> bool:
+    """Check the primary combined score, falling back to numeric average for legacy evaluators."""
+    if "combined_score" in metrics:
+        score = metrics["combined_score"]
+    else:
+        numeric_metrics = [
+            value
+            for value in metrics.values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        score = sum(numeric_metrics) / len(numeric_metrics) if numeric_metrics else None
+    return score is not None and score >= target_score
 
 
 @dataclass
@@ -67,6 +82,12 @@ def _worker_init(config_dict: dict, evaluation_file: str) -> None:
         **{k: v for k, v in config_dict.items() 
            if k not in ['llm', 'prompt', 'database', 'evaluator']}
     )
+    # Worker processes have their own Python/NumPy random generators.
+    if _worker_config.random_seed is not None:
+        import random
+        import numpy as np
+        random.seed(_worker_config.random_seed)
+        np.random.seed(_worker_config.random_seed)
     _worker_evaluation_file = evaluation_file
     
     # These will be lazily initialized on first use
@@ -108,6 +129,7 @@ def _lazy_init_worker_components():
         )
 
 
+@traced("iteration")
 def _run_iteration_worker(
     iteration: int,
     db_snapshot: Dict[str, Any],
@@ -118,6 +140,14 @@ def _run_iteration_worker(
     try:
         # Lazy initialization
         _lazy_init_worker_components()
+
+        # Worker-side randomness depends on (run seed, iteration) only, not on
+        # which worker process happens to pick the iteration up.
+        if _worker_config.random_seed is not None:
+            import random
+            import numpy as np
+            random.seed(derive_seed(_worker_config.random_seed, "worker", iteration))
+            np.random.seed(derive_seed(_worker_config.random_seed, "worker", iteration))
         
         # Reconstruct programs from snapshot
         programs = {
@@ -168,28 +198,35 @@ def _run_iteration_worker(
         include_inspiration_artifacts = _worker_config.prompt.include_artifacts_for_all_programs or _worker_config.prompt.include_inspiration_artifacts
         
         # Build prompt
-        prompt = _worker_prompt_sampler.build_prompt(
-            current_program=parent.code,
-            parent_program=parent.code,
-            program_metrics=parent.metrics,
-            previous_programs=enhance_programs_with_artifacts(island_previous_programs, include_top_artifacts),
-            top_programs=enhance_programs_with_artifacts(island_top_programs, include_top_artifacts),
-            inspirations=enhance_programs_with_artifacts(inspirations, include_inspiration_artifacts),
-            language=_worker_config.language,
-            evolution_round=iteration,
-            diff_based_evolution=_worker_config.diff_based_evolution,
-            program_artifacts=parent_artifacts,
-        )
+        with trace_span("prompt_build", iteration=iteration):
+            prompt = _worker_prompt_sampler.build_prompt(
+                current_program=parent.code,
+                parent_program=parent.code,
+                program_metrics=parent.metrics,
+                previous_programs=enhance_programs_with_artifacts(island_previous_programs, include_top_artifacts),
+                top_programs=enhance_programs_with_artifacts(island_top_programs, include_top_artifacts),
+                inspirations=enhance_programs_with_artifacts(inspirations, include_inspiration_artifacts),
+                language=_worker_config.language,
+                evolution_round=iteration,
+                diff_based_evolution=_worker_config.diff_based_evolution,
+                program_artifacts=parent_artifacts,
+            )
         
         iteration_start = time.time()
         
         # Generate code modification (sync wrapper for async)
-        llm_response = asyncio.run(
-            _worker_llm_ensemble.generate_with_context(
-                system_message=prompt["system"],
-                messages=[{"role": "user", "content": prompt["user"]}],
+        # A single fixed request seed makes the server return the identical reply
+        # every time a parent is re-sampled (the prompt is unchanged), so the
+        # sampling seed must differ per iteration while staying reproducible.
+        request_seed = derive_seed(_worker_config.random_seed, "llm", iteration)
+        with trace_span("llm_generate", iteration=iteration, seed=request_seed):
+            llm_response = asyncio.run(
+                _worker_llm_ensemble.generate_with_context(
+                    system_message=prompt["system"],
+                    messages=[{"role": "user", "content": prompt["user"]}],
+                    **({} if request_seed is None else {"seed": request_seed}),
+                )
             )
-        )
         
         # Parse response based on evolution mode
         if _worker_config.diff_based_evolution:
@@ -197,13 +234,23 @@ def _run_iteration_worker(
             
             diff_blocks = extract_diffs(llm_response)
             if not diff_blocks:
+                logger.warning("Unparseable LLM edit (raw response): %r", llm_response)
                 return SerializableResult(
                     error=f"No valid diffs found in response",
                     iteration=iteration
                 )
             
-            child_code = apply_diff(parent.code, llm_response)
+            with trace_span("diff_apply", iteration=iteration):
+                child_code = apply_diff(parent.code, llm_response)
             changes_summary = format_diff_summary(diff_blocks)
+            # apply_diff skips SEARCH blocks that do not match. A child identical
+            # to its parent is a failed edit, not a new candidate to grade/store.
+            if child_code == parent.code:
+                logger.warning("LLM edit left the program unchanged (raw response): %r", llm_response)
+                return SerializableResult(
+                    error="Diff did not change the program (SEARCH text unmatched or no-op edit)",
+                    iteration=iteration
+                )
         else:
             from openevolve.utils.code_utils import parse_full_rewrite
             
@@ -227,9 +274,10 @@ def _run_iteration_worker(
         # Evaluate the child program
         import uuid
         child_id = str(uuid.uuid4())
-        child_metrics = asyncio.run(
-            _worker_evaluator.evaluate_program(child_code, child_id)
-        )
+        with trace_span("candidate_evaluation", iteration=iteration, program_id=child_id):
+            child_metrics = asyncio.run(
+                _worker_evaluator.evaluate_program(child_code, child_id)
+            )
         
         # Get artifacts
         artifacts = _worker_evaluator.get_pending_artifacts(child_id)
@@ -439,7 +487,8 @@ class ProcessParallelController:
                     child_program = Program(**result.child_program_dict)
                     
                     # Add to database
-                    self.database.add(child_program, iteration=completed_iteration)
+                    with trace_span("database_update", iteration=completed_iteration):
+                        self.database.add(child_program, iteration=completed_iteration)
                     
                     # Store artifacts
                     if result.artifacts:
@@ -519,18 +568,16 @@ class ProcessParallelController:
                             checkpoint_callback(completed_iteration)
                     
                     # Check target score
-                    if target_score is not None and child_program.metrics:
-                        numeric_metrics = [
-                            v for v in child_program.metrics.values()
-                            if isinstance(v, (int, float))
-                        ]
-                        if numeric_metrics:
-                            avg_score = sum(numeric_metrics) / len(numeric_metrics)
-                            if avg_score >= target_score:
-                                logger.info(
-                                    f"Target score {target_score} reached at iteration {completed_iteration}"
-                                )
-                                break
+                    if target_score is not None and has_reached_target_score(
+                        child_program.metrics, target_score
+                    ):
+                        record_target_reached(completed_iteration, child_program.metrics.get("combined_score"))
+                        logger.info(
+                            f"Target score {target_score} reached at iteration {completed_iteration}"
+                        )
+                        for pending_future in pending_futures.values():
+                            pending_future.cancel()
+                        break
                 
             except Exception as e:
                 logger.error(f"Error processing result from iteration {completed_iteration}: {e}")
@@ -558,10 +605,12 @@ class ProcessParallelController:
         """Submit an iteration to the process pool"""
         try:
             # Sample parent and inspirations
-            parent, inspirations = self.database.sample(self.config.prompt.num_inspiration_programs)
+            with trace_span("parent_selection", iteration=iteration):
+                parent, inspirations = self.database.sample(self.config.prompt.num_inspiration_programs)
             
             # Create database snapshot
-            db_snapshot = self._create_database_snapshot()
+            with trace_span("database_snapshot", iteration=iteration):
+                db_snapshot = self._create_database_snapshot()
             
             # Submit to process pool
             future = self.executor.submit(

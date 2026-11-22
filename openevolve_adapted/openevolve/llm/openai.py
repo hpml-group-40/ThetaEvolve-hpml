@@ -11,6 +11,7 @@ import openai
 
 from openevolve.config import LLMConfig
 from openevolve.llm.base import LLMInterface
+from openevolve.utils.trace_utils import profile_vllm_request, trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +124,22 @@ class OpenAILLM(LLMInterface):
         """Make the actual API call"""
         # Use asyncio to run the blocking API call in a thread pool
         loop = asyncio.get_event_loop()
+        def call():
+            with trace_span("llm_request", seed=params.get("seed"), max_tokens=params.get("max_tokens")) as span:
+                with profile_vllm_request(self.api_base, self.client.api_key):
+                    result = self.client.chat.completions.create(**params)
+                usage = getattr(result, "usage", None)
+                if usage is not None:
+                    span.update(
+                        prompt_tokens=getattr(usage, "prompt_tokens", None),
+                        completion_tokens=getattr(usage, "completion_tokens", None),
+                    )
+                if getattr(result, "choices", None):
+                    span["finish_reason"] = getattr(result.choices[0], "finish_reason", None)
+                return result
+
         response = await loop.run_in_executor(
-            None, lambda: self.client.chat.completions.create(**params)
+            None, call
         )
         
         # Logging of system prompt, user message and response content
