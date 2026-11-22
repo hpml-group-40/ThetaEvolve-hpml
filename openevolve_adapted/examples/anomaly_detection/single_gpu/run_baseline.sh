@@ -40,7 +40,7 @@ config=yaml.safe_load(Path('examples/anomaly_detection/configs/config_anomaly_de
 assert config['prompt']['use_system_message_sampling'] is True
 PY
 RC=0
-python -u examples/anomaly_detection/single_gpu/run.py --mode benchmark --model "$MODEL" --seed "$SEED" --target-f1 1.0 --budget-seconds "$BUDGET" --output "$OUTPUT/evolution" > "$OUTPUT/evolution.log" 2>&1 || RC=$?
+python -u examples/anomaly_detection/single_gpu/run.py --mode benchmark --model "$MODEL" --seed "$SEED" --target-f1 1.0 --budget-seconds "$BUDGET" ${HPML_WEIGHTS_GIB:+--weights-gib "$HPML_WEIGHTS_GIB"} --output "$OUTPUT/evolution" > "$OUTPUT/evolution.log" 2>&1 || RC=$?
 printf '%s\n' "$RC" > "$OUTPUT/exit_code.txt"
 python - "$OUTPUT" <<'PY'
 import json, sys

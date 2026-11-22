@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
-from openevolve.utils.trace_utils import derive_seed, record_target_reached, trace_span, traced
+from openevolve.utils.trace_utils import (
+    derive_seed, record_target_reached, trace_iteration_result, trace_span, traced,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +500,9 @@ class ProcessParallelController:
                 
                 if result.error:
                     logger.warning(f"Iteration {completed_iteration} error: {result.error}")
+                    trace_iteration_result(
+                        completed_iteration, "discarded", self._best_score(), reason=result.error[:80]
+                    )
                 elif result.child_program_dict:
                     # Reconstruct program from dict
                     child_program = Program(**result.child_program_dict)
@@ -509,6 +514,19 @@ class ProcessParallelController:
                     # Store artifacts
                     if result.artifacts:
                         self.database.store_artifacts(child_program.id, result.artifacts)
+
+                    import hashlib
+                    child_score = child_program.metrics.get("combined_score")
+                    parent_score = (child_program.metadata.get("parent_metrics") or {}).get("combined_score")
+                    trace_iteration_result(
+                        completed_iteration, "graded", self._best_score(),
+                        score=child_score, valid=child_program.metrics.get("validity") == 1,
+                        improved_on_parent=(
+                            child_score is not None and parent_score is not None and child_score > parent_score
+                        ),
+                        new_best=self.database.best_program_id == child_program.id,
+                        code_hash=hashlib.md5(child_program.code.encode()).hexdigest()[:12],
+                    )
                     
                     # Log prompts
                     if result.prompt:
@@ -617,6 +635,10 @@ class ProcessParallelController:
         
         return self.database.get_best_program()
     
+    def _best_score(self) -> Optional[float]:
+        best = self.database.get_best_program()
+        return best.metrics.get("combined_score") if best and best.metrics else None
+
     def _submit_iteration(self, iteration: int) -> Optional[Future]:
         """Submit an iteration to the process pool"""
         try:

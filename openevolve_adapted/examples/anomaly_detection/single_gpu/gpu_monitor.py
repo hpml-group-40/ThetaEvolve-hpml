@@ -30,6 +30,19 @@ VLLM_METRICS = {
     "vllm:prefix_cache_queries_total": "prefix_cache_queries_total",
     "vllm:prefix_cache_hits_total": "prefix_cache_hits_total",
 }
+# Latency histograms: cumulative _sum and _count are sampled; means over any
+# interval are (delta sum) / (delta count).
+VLLM_HISTOGRAMS = {
+    "vllm:time_to_first_token_seconds": "ttft",
+    "vllm:time_per_output_token_seconds": "inter_token",
+    "vllm:e2e_request_latency_seconds": "e2e",
+    "vllm:request_queue_time_seconds": "queue",
+    "vllm:request_prefill_time_seconds": "prefill",
+    "vllm:request_decode_time_seconds": "decode",
+}
+for _name, _short in VLLM_HISTOGRAMS.items():
+    VLLM_METRICS[_name + "_sum"] = _short + "_seconds_sum"
+    VLLM_METRICS[_name + "_count"] = _short + "_count"
 METRIC_LINE = re.compile(r"^([a-zA-Z_:][\w:]*)(?:\{[^}]*\})?\s+([-+eE.\d]+|NaN)$")
 
 
@@ -54,6 +67,7 @@ class Monitor:
         self.metrics_url, self.metrics_interval = metrics_url, metrics_interval
         self.stop_event = threading.Event()
         self.threads, self.process = [], None
+        self.last_metrics_text = None
         self.lock = threading.Lock()
         self.events = (self.output_dir / "client-gpu-monitor.jsonl").open("a")
 
@@ -95,12 +109,18 @@ class Monitor:
                 now = time.time()
                 try:
                     with urlopen(self.metrics_url, timeout=5) as response:
-                        values = parse_metrics(response.read().decode())
+                        text = response.read().decode()
+                    values = parse_metrics(text)
                 except Exception:
                     continue
+                # Raw first/last pages give exact run deltas, histogram buckets included.
+                if previous is None:
+                    (self.output_dir / "vllm_metrics_start.txt").write_text(text)
+                self.last_metrics_text = text
                 rate = None
                 if previous and "generation_tokens_total" in values and "generation_tokens_total" in previous[1]:
                     rate = (values["generation_tokens_total"] - previous[1]["generation_tokens_total"]) / (now - previous[0])
+                before = previous[1] if previous else {}
                 previous = (now, values)
                 writer.writerow({"epoch_seconds": f"{now:.3f}", "generation_tokens_per_second": rate, **values})
                 stream.flush()
@@ -109,6 +129,11 @@ class Monitor:
                         self.counter(f"vLLM {key}", now * 1e6, {"value": values[key]})
                 if rate is not None:
                     self.counter("vLLM generation tokens/s", now * 1e6, {"value": rate})
+                for short, label in (("ttft", "time to first token ms"), ("inter_token", "inter-token latency ms")):
+                    count = values.get(short + "_count", 0) - before.get(short + "_count", 0)
+                    if before and count > 0:
+                        total = values[short + "_seconds_sum"] - before[short + "_seconds_sum"]
+                        self.counter(f"vLLM {label}", now * 1e6, {"value": 1000 * total / count})
 
     def start(self):
         targets = [self._gpu_loop] + ([self._metrics_loop] if self.metrics_url else [])
@@ -119,6 +144,14 @@ class Monitor:
 
     def stop(self):
         self.stop_event.set()
+        if self.metrics_url:
+            try:  # one last page after the run's final request has finished
+                with urlopen(self.metrics_url, timeout=5) as response:
+                    self.last_metrics_text = response.read().decode()
+            except Exception:
+                pass
+            if self.last_metrics_text:
+                (self.output_dir / "vllm_metrics_end.txt").write_text(self.last_metrics_text)
         if self.process:
             self.process.terminate()
         for thread in self.threads:

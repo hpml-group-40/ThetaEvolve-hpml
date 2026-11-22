@@ -62,6 +62,37 @@ def trace_span(name, **fields):
             logger.exception("Could not write HPML trace event")
 
 
+def run_elapsed_seconds():
+    """Seconds since the launcher started the evolution clock, if it set one."""
+    start = os.environ.get("HPML_RUN_START_NS")
+    return (time.perf_counter_ns() - int(start)) / 1e9 if start else None
+
+
+def trace_counter(name, **values):
+    """Write one Chrome Trace counter sample (a Perfetto counter track)."""
+    directory = os.environ.get("HPML_TRACE_DIR")
+    if not directory:
+        return
+    event = {"name": name, "cat": "openevolve", "ph": "C", "ts": time.time_ns() / 1000,
+             "pid": os.getpid(), "tid": 0, "args": values}
+    try:
+        root = Path(directory)
+        root.mkdir(parents=True, exist_ok=True)
+        with open(root / f"client-{os.getpid()}.jsonl", "a") as stream:
+            stream.write(json.dumps(event) + "\n")
+    except OSError:
+        logger.exception("Could not write HPML trace counter")
+
+
+def trace_iteration_result(iteration, outcome, best_score=None, **fields):
+    """Record how one iteration ended; the run summary and F1 curve are built from these."""
+    with trace_span("iteration_result", iteration=iteration, outcome=outcome, best_score=best_score,
+                    elapsed_seconds=run_elapsed_seconds(), **fields):
+        pass
+    if best_score is not None:
+        trace_counter("best search F1", f1=best_score)
+
+
 def traced(name):
     """Trace a synchronous function without changing its call signature."""
     def decorate(function):

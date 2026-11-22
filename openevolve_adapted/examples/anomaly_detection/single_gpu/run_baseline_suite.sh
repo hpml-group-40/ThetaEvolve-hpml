@@ -57,6 +57,8 @@ PY
 }
 
 start_server server
+# Weight size as loaded by vLLM, for the hardware-limit summary.
+export HPML_WEIGHTS_GIB="$(grep -oP 'Model loading took \K[0-9.]+(?= GiB)' "$SUITE/server.log" | head -n 1)"
 for SEED in $SEEDS; do
     printf '%s Starting seed %s\n' "$(date -u +%FT%TZ)" "$SEED"
     if ! bash "$SCRIPT_DIR/run_baseline.sh" "$SUITE/server.launch.json" "$SEED" "$BUDGET" "$SUITE/seed_$SEED" > "$SUITE/seed_$SEED.launcher.log" 2>&1; then
@@ -72,21 +74,35 @@ stop_server
 python - "$SUITE" "$BUDGET" $SEEDS <<'PY'
 import csv, json, statistics, sys
 from pathlib import Path
-p=Path(sys.argv[1]); budget=int(sys.argv[2]); seeds=[int(s) for s in sys.argv[3:]]; rows=[]
+p=Path(sys.argv[1]); budget=int(sys.argv[2]); seeds=[int(s) for s in sys.argv[3:]]; rows=[]; curves={}
 for seed in seeds:
     s=json.loads((p/f'seed_{seed}/summary.json').read_text())
     m=s['best']['metrics']; r=s['run']; t=s.get('trace_summary') or {}
     assert m.get('validity') == 1, f'Invalid best program for seed {seed}'
+    g=t.get('programs') or {}; lat=t.get('serving_latency') or {}; hw=t.get('hardware_limit') or {}
+    curves[seed]=t.get('best_f1_curve') or []
     rows.append({'seed':seed,'search_f1':m['combined_score'],'precision':m['precision'],'recall':m['recall'],
                  'best_iteration':s['best']['iteration'],'budget_seconds':r['budget_seconds'],
                  'wall_seconds_including_cleanup':r['wall_seconds_including_cleanup'],'stop_reason':r['stop_reason'],
                  'candidates_evaluated':(t.get('loop') or {}).get('candidates_evaluated'),
                  'llm_requests':(t.get('llm') or {}).get('requests'),
+                 'replies_discarded':g.get('replies_discarded'),'programs_graded':g.get('graded'),
+                 'programs_valid':g.get('valid'),'programs_distinct_valid':g.get('distinct_valid_programs'),
+                 'mean_time_to_first_token_seconds':(lat.get('time_to_first_token') or {}).get('mean_seconds'),
+                 'mean_inter_token_latency_seconds':(lat.get('inter_token_latency') or {}).get('mean_seconds'),
+                 'decode_tokens_per_second':hw.get('decode_tokens_per_s'),
+                 'tokens_per_decode_step':hw.get('tokens_per_decode_step'),
+                 'fraction_of_memory_bandwidth':hw.get('fraction_of_memory_bandwidth'),
                  'output_tokens_per_second_while_generating':(t.get('llm') or {}).get('output_tokens_per_second_while_generating'),
                  'mean_gpu_utilization_percent':(t.get('gpu') or {}).get('mean_utilization_percent'),
                  'peak_gpu_memory_mib':(t.get('gpu') or {}).get('peak_memory_used_mib')})
 scores=[r['search_f1'] for r in rows]
+# Target for later comparisons: the median best search F1 across the seeds.
+target=statistics.median(scores)
+for r in rows:
+    r['seconds_to_median_best_f1']=next((c['elapsed_seconds'] for c in curves[r['seed']] if c['best_f1']>=target),None)
 summary={'budget_seconds_per_seed':budget,'seeds':seeds,'results':rows,'mean_search_f1':statistics.mean(scores),
+         'median_best_search_f1_target':target,
          'sample_std_search_f1':statistics.stdev(scores) if len(scores)>1 else None,
          'server_startup':json.loads((p/'server.startup.json').read_text()),'heldout_evaluated':False}
 (p/'baseline_summary.json').write_text(json.dumps(summary,indent=2))
@@ -104,6 +120,9 @@ if [[ "${HPML_SKIP_PROFILE:-0}" != "1" ]]; then
         --seed "${SEEDS%% *}" --iterations 3 --budget-seconds 600 --target-f1 1.0 \
         --output "$SUITE/diagnostic_profile/evolution" > "$SUITE/diagnostic_profile/run.log" 2>&1 \
         || printf 'Diagnostic profile failed; see %s\n' "$SUITE/diagnostic_profile/run.log"
+    python examples/anomaly_detection/single_gpu/analyze_kernel_trace.py "$SUITE/diagnostic_profile/gpu_kernel_trace" \
+        --output "$SUITE/diagnostic_profile/kernel_summary.json" > /dev/null \
+        || printf 'Kernel trace analysis failed\n'
     stop_server
 fi
 printf 'complete\n' > "$SUITE/status.txt"

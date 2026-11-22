@@ -18,7 +18,7 @@ from openevolve.evaluator import Evaluator
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.process_parallel import ProcessParallelController, has_reached_target_score
-from openevolve.utils.trace_utils import record_target_reached, trace_span, traced
+from openevolve.utils.trace_utils import record_target_reached, trace_iteration_result, trace_span, traced
 from openevolve.utils.code_utils import (
     extract_code_language,
 )
@@ -273,6 +273,10 @@ class OpenEvolve:
             )
 
             self.database.add(initial_program)
+            trace_iteration_result(
+                start_iteration, "initial", initial_metrics.get("combined_score"),
+                score=initial_metrics.get("combined_score"), valid=initial_metrics.get("validity") == 1,
+            )
             
             # Check if combined_score is present in the metrics
             if "combined_score" not in initial_metrics:

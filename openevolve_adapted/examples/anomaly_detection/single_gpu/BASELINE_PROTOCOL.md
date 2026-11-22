@@ -74,3 +74,14 @@ because the loop sent one fixed sampling seed with every request.
   examples are gone. The loop accepts either a block rewrite or SEARCH/REPLACE.
 - Search history: the two best programs so far are shown (EVOLVE-BLOCK only)
   ahead of the parent program.
+- Primary metric: wall-clock time to reach the target search F1. The target is
+  the median of the three baseline seeds' best search F1 (`baseline_summary.json`).
+  Every run, optimized ones included, uses the full budget with stop target 1.0;
+  `best_f1_curve.csv` records each improvement, and time to target is read from
+  it. A run that never reaches the target is reported as a miss at the budget.
+- Each run's `trace_summary.json` also reports: programs requested, discarded,
+  graded, valid and distinct; time to first token, inter-token latency and
+  queue/prefill/decode time from vLLM's histograms; decode speed against the
+  memory-bandwidth limit; and a minute-by-minute timeline.
+  `diagnostic_profile/kernel_summary.json` gives the GPU busy fraction and the
+  kernel mix from the kernel trace.

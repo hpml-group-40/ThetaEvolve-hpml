@@ -89,6 +89,8 @@ def main(argv=None):
     parser.add_argument("--no-trace", action="store_true",
                         help="Benchmark only: disable loop spans and GPU/vLLM counter sampling")
     parser.add_argument("--gpu", default="0", help="GPU index sampled by nvidia-smi")
+    parser.add_argument("--weights-gib", type=float, help="Model weight size from the server log, for the hardware-limit summary")
+    parser.add_argument("--bandwidth-gb-per-s", type=float, default=300.0, help="GPU memory bandwidth (L4: 300)")
     parser.add_argument("--profile-seconds", type=float, default=5.0,
                         help="Profile mode: stop the CUDA kernel profiler this long into the first LLM call (0 = whole call)")
     parser.add_argument("--print-command", action="store_true", help="Print only; no data, server or GPU needed")
@@ -195,7 +197,12 @@ def main(argv=None):
         from trace_summary import summarize
         events = merge_traces(trace_directory, output / "loop_trace.json")
         metadata["trace_events"] = len(events)
-        (output / "trace_summary.json").write_text(json.dumps(summarize(events), indent=2))
+        trace_summary = summarize(events, trace_directory, args.weights_gib, args.bandwidth_gb_per_s)
+        (output / "trace_summary.json").write_text(json.dumps(trace_summary, indent=2))
+        with (output / "best_f1_curve.csv").open("w") as stream:
+            stream.write("elapsed_seconds,best_f1,iteration\n")
+            for point in trace_summary.get("best_f1_curve", []):
+                stream.write(f"{point['elapsed_seconds']},{point['best_f1']},{point['iteration']}\n")
         if not any(event.get("ph") == "X" for event in events):
             print("CPU trace is empty; check trace output permissions.", file=sys.stderr)
             returncode = returncode or 1
