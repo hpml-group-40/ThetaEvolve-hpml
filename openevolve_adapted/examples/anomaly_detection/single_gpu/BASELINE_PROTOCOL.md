@@ -85,3 +85,16 @@ because the loop sent one fixed sampling seed with every request.
   memory-bandwidth limit; and a minute-by-minute timeline.
   `diagnostic_profile/kernel_summary.json` gives the GPU busy fraction and the
   kernel mix from the kernel trace.
+
+## Revision 2 of 2026-11-22 (supersedes the first 2026-11-22 baseline)
+
+In the first 2026-11-22 baseline no seed improved on the starting program
+(0.541) in 15 minutes, so time to target could not be measured.
+
+- Starting program: threshold 1 x RMS (search F1 0.101) instead of 3 x RMS.
+- Archive: the best 10 programs instead of up to 100, so "exploit" parent
+  sampling picks from the best programs.
+- Target: search F1 0.50, fixed before the measured runs and used for every
+  later configuration (`HPML_TARGET_F1=0.50`). It was chosen from one pilot run
+  of seed 42, which crossed it at 7:33 of 15:00. A seed that never reaches it
+  is reported as a miss at the budget.
