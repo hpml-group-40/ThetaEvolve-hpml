@@ -128,6 +128,9 @@ class PromptConfig:
     # Multi-prompt support - list of system messages with sampling weights
     system_message_list: Optional[List[Dict[str, Union[str, float]]]] = None
     use_system_message_sampling: bool = False
+    # Show only the EVOLVE-BLOCK of prior/top programs in prompts (the current
+    # program is always shown whole). Keeps prompts short when boilerplate is fixed.
+    history_evolve_block_only: bool = False
 
     # Number of examples to include in the prompt
     num_top_programs: int = 3

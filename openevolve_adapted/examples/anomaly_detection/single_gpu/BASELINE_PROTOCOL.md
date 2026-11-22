@@ -67,3 +67,10 @@ because the loop sent one fixed sampling seed with every request.
   decode steps); a whole eager reply is too large to open in Perfetto.
 - GPU memory allowance 0.90 and `--max-num-seqs 1` are now `serve.py` flags and
   defaults; no files outside the repository are needed.
+- Prompt (frozen from this revision): the system message describes the task,
+  inputs, scoring and the rules that keep code runnable, and leaves the detection
+  method open. The task template in `prompts/` asks for the complete new
+  EVOLVE-BLOCK in one code block with no explanation; the generic SEARCH/REPLACE
+  examples are gone. The loop accepts either a block rewrite or SEARCH/REPLACE.
+- Search history: the two best programs so far are shown (EVOLVE-BLOCK only)
+  ahead of the parent program.

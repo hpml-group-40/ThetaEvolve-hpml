@@ -56,6 +56,39 @@ def extract_diffs(diff_text: str) -> List[Tuple[str, str]]:
     return [(match[0].rstrip(), match[1].rstrip()) for match in diff_blocks]
 
 
+def apply_evolve_block_rewrite(original_code: str, llm_response: str) -> Optional[str]:
+    """
+    Accept a reply that rewrites the whole EVOLVE-BLOCK instead of sending a diff.
+
+    The reply's last fenced code block (or the bare reply) becomes the new block
+    content. If it repeats the EVOLVE-BLOCK markers, e.g. because the model
+    returned the whole program, only the text between them is used. Returns the
+    new program, or None when the reply cannot be used this way.
+    """
+    start_marker, end_marker = "# EVOLVE-BLOCK-START", "# EVOLVE-BLOCK-END"
+    lines = original_code.split("\n")
+    starts = [i for i, line in enumerate(lines) if start_marker in line]
+    ends = [i for i, line in enumerate(lines) if end_marker in line]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return None
+
+    fenced = re.findall(r"```[^\n`]*\n(.*?)```", llm_response, re.DOTALL)
+    block = fenced[-1] if fenced else llm_response
+    if start_marker in block and end_marker in block:
+        block = block.split(start_marker, 1)[1].split(end_marker, 1)[0]
+    elif start_marker in block or end_marker in block:
+        return None
+    block = block.strip("\n")
+    # Require code that defines something and parses, not prose or a fragment.
+    if not re.search(r"^def \w+\(", block, re.MULTILINE):
+        return None
+    try:
+        compile(block, "<llm_block>", "exec")
+    except (SyntaxError, ValueError):
+        return None
+    return "\n".join(lines[: starts[0] + 1] + block.split("\n") + ["", ""] + lines[ends[0]:])
+
+
 def parse_full_rewrite(llm_response: str, language: str = "python") -> Optional[str]:
     """
     Extract a full rewrite from an LLM response

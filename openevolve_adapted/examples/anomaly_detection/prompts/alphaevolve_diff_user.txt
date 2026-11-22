@@ -1,0 +1,13 @@
+{context}
+
+{evolution_history}
+
+- Current program -
+This is the program to improve. Its scores on the search data are listed above the code.
+
+{current_program_content}
+
+- Task -
+Write a better `detect_anomalies`. You may change the algorithm completely and add helper functions; the code between `# EVOLVE-BLOCK-START` and `# EVOLVE-BLOCK-END` is yours to replace. Prefer an idea that differs from the programs shown above over a small tweak of a constant.
+
+Reply with only one ```python code block containing the complete new contents of the EVOLVE-BLOCK: the full `detect_anomalies` function plus any helper functions it needs, and nothing from outside the block. Do not add an explanation.

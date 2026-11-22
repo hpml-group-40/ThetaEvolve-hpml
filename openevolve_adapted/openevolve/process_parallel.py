@@ -180,13 +180,22 @@ def _run_iteration_worker(
         island_previous_programs = island_programs[:_worker_config.prompt.num_top_programs]
         
         # Enhance programs with artifacts if requested in config
+        def history_dict(program):
+            program_dict = program.to_dict()
+            if getattr(_worker_config.prompt, "history_evolve_block_only", False):
+                code = program_dict.get("code") or ""
+                start, end = "# EVOLVE-BLOCK-START", "# EVOLVE-BLOCK-END"
+                if code.count(start) == 1 and code.count(end) == 1:
+                    program_dict["code"] = code.split(start, 1)[1].split(end, 1)[0].strip("\n")
+            return program_dict
+
         def enhance_programs_with_artifacts(programs, include_artifacts):
             if not include_artifacts:
-                return [p.to_dict() for p in programs]
+                return [history_dict(p) for p in programs]
             
             enhanced = []
             for p in programs:
-                program_dict = p.to_dict()
+                program_dict = history_dict(p)
                 artifacts = db_snapshot["artifacts"].get(p.id)
                 if artifacts:
                     program_dict['artifacts'] = artifacts
@@ -233,16 +242,23 @@ def _run_iteration_worker(
             from openevolve.utils.code_utils import extract_diffs, apply_diff, format_diff_summary
             
             diff_blocks = extract_diffs(llm_response)
-            if not diff_blocks:
-                logger.warning("Unparseable LLM edit (raw response): %r", llm_response)
-                return SerializableResult(
-                    error=f"No valid diffs found in response",
-                    iteration=iteration
-                )
-            
-            with trace_span("diff_apply", iteration=iteration):
-                child_code = apply_diff(parent.code, llm_response)
-            changes_summary = format_diff_summary(diff_blocks)
+            if diff_blocks:
+                with trace_span("diff_apply", iteration=iteration):
+                    child_code = apply_diff(parent.code, llm_response)
+                changes_summary = format_diff_summary(diff_blocks)
+            else:
+                # Small models often return the rewritten block without diff
+                # markers. That is a usable edit, so splice it in.
+                from openevolve.utils.code_utils import apply_evolve_block_rewrite
+                with trace_span("diff_apply", iteration=iteration, form="block_rewrite"):
+                    child_code = apply_evolve_block_rewrite(parent.code, llm_response)
+                if child_code is None:
+                    logger.warning("Unparseable LLM edit (raw response): %r", llm_response)
+                    return SerializableResult(
+                        error=f"No valid diffs found in response",
+                        iteration=iteration
+                    )
+                changes_summary = "EVOLVE-BLOCK rewrite"
             # apply_diff skips SEARCH blocks that do not match. A child identical
             # to its parent is a failed edit, not a new candidate to grade/store.
             if child_code == parent.code:

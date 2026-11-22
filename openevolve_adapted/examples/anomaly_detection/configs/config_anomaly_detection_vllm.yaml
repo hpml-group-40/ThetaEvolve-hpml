@@ -30,40 +30,53 @@ prompt:
   use_system_prompt: true
   use_system_message_sampling: true
   system_message_list:
-  - message: 'Improve the detect_anomalies function in the candidate program. It receives
-      a KPI''s forecast errors and missing-point mask and returns one binary anomaly
-      flag per point. Optimize pooled pointwise F1 across the search KPIs. Missing
-      points are excluded from scoring. The verifier loads labels independently; do
-      not change the saved-result format or read held-out data.
+  - weight: 1.0
+    message: 'You are an expert in time-series anomaly detection and numerical Python. You are improving
+      one function of a program through repeated rounds of edits; each edit is run and scored automatically.
 
-      Return exactly one SEARCH/REPLACE patch and nothing else. Use the literal marker
-      lines shown below, each on its own line:
 
-      <<<<<<< SEARCH
+      The task: monitoring metrics (KPIs) from production services were forecast by a fixed model. For
+      each KPI, `detect_anomalies(error, missing)` receives `error`, a 1-D float32 NumPy array of forecast
+      errors (actual minus forecast) in time order with about 150,000 points, and `missing`, a boolean
+      array of the same shape marking points that had no measurement. It must return a boolean array of
+      the same shape that is True where the point is anomalous. The function is called once per KPI and
+      sees only that KPI.
 
-      [the entire current detect_anomalies function copied verbatim, including indentation]
 
-      =======
+      The score is pointwise F1 pooled over all KPIs: every flagged point that is not labeled anomalous
+      costs precision, and every labeled point that is not flagged costs recall. Missing points are not
+      scored. Anomalies are rare, around 1% of points, and the labels are not available to the program.
 
-      [the entire replacement detect_anomalies function]
 
-      >>>>>>> REPLACE
+      You are free to use any detection method, for example robust or rolling statistics, adaptive thresholds,
+      smoothing, differencing, or combining several signals. The edit only counts if it runs, so follow
+      these rules:
 
-      Only modify detect_anomalies. Preserve the function signature and return a binary
-      array with the same shape as error. Use the existing NumPy import. Do not read
-      label files or other data files. Do not include explanations, Markdown headings,
-      alternative solutions, or separate SEARCH and REPLACE code fences. Your response
-      must start with <<<<<<< SEARCH and end with >>>>>>> REPLACE.
+      - Keep the signature `detect_anomalies(error: np.ndarray, missing: np.ndarray) -> np.ndarray` and
+      return a boolean array with the same shape as `error`.
+
+      - Use only NumPy (already imported as `np`) and the Python standard library. Do not import other
+      packages.
+
+      - Use vectorized NumPy operations. A Python loop over every point is too slow and will time out.
+
+      - Never flag a missing point, and do not let missing points distort your statistics.
+
+      - Handle edge cases without raising: zero spread, NaN from empty slices, windows longer than the
+      array.
+
+      - Do not read or write files and do not change code outside the EVOLVE-BLOCK.
 
       '
-    weight: 1.0
-  num_top_programs: 0
+  num_top_programs: 2
   num_diverse_programs: 0
   num_inspiration_programs: 0
   use_template_stochasticity: true
   include_artifacts: true
   max_artifact_bytes: 16384
   artifact_security_filter: true
+  template_dir: ../prompts
+  history_evolve_block_only: true
 database:
   population_size: 1000
   archive_size: 100

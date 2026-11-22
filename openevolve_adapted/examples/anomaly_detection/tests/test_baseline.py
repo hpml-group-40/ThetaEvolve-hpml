@@ -30,8 +30,9 @@ class BaselineTests(unittest.TestCase):
         prompt=PromptSampler(config.prompt).build_prompt(
             current_program=(EXAMPLE/'initial_programs/initial_program.py').read_text(),
             program_metrics={'combined_score':0.5412038233014724})
-        self.assertIn('Optimize pooled pointwise F1',prompt['system'])
-        self.assertIn('<<<<<<< SEARCH',prompt['user'])
+        self.assertIn('pointwise F1 pooled over all KPIs',prompt['system'])
+        self.assertIn('complete new contents of the EVOLVE-BLOCK',prompt['user'])
+        self.assertNotIn('<<<<<<< SEARCH',prompt['user'])
 
     def test_worker_randomness_repeats_by_seed(self):
         def samples(seed):
@@ -90,6 +91,38 @@ class RequestSeedTests(unittest.TestCase):
         self.assertNotEqual(seeds, self.run_iterations(43, [edit, edit, edit])[0])
         self.assertEqual(len(evaluated), 3)
         self.assertTrue(all(result.error is None for result in results))
+
+    def test_block_rewrite_without_diff_markers_is_graded(self):
+        block = ('def helper(x):\n    return np.abs(x)\n\n\n'
+                 'def detect_anomalies(error: np.ndarray, missing: np.ndarray) -> np.ndarray:\n'
+                 '    return (~missing) & (helper(error) > 1.0)')
+        whole = '# EVOLVE-BLOCK-START\n' + block + '\n# EVOLVE-BLOCK-END\n\ndef main():\n    pass'
+        replies = [f'My idea.\n```python\n{block}\n```', f'```python\n{whole}\n```', 'Use a rolling median instead.']
+        seeds, evaluated, results = self.run_iterations(42, replies)
+        self.assertEqual(len(evaluated), 2)
+        self.assertEqual(evaluated[0], evaluated[1])
+        compile(evaluated[0], 'child', 'exec')
+        self.assertIn('def helper', evaluated[0])
+        self.assertEqual(evaluated[0].count('def main'), 1)
+        self.assertEqual(evaluated[0].count('# EVOLVE-BLOCK-START'), 1)
+        self.assertIn('No valid diffs', results[2].error)
+
+    def test_history_shows_only_the_evolve_block(self):
+        import openevolve.process_parallel as pp
+        captured = {}
+        original = PromptSampler.build_prompt
+        def spy(sampler, **kwargs):
+            captured.update(kwargs)
+            return original(sampler, **kwargs)
+        PromptSampler.build_prompt = spy
+        try:
+            self.run_iterations(42, ['no edit'])
+        finally:
+            PromptSampler.build_prompt = original
+        self.assertTrue(captured['top_programs'])
+        self.assertNotIn('def main', captured['top_programs'][0]['code'])
+        self.assertIn('def detect_anomalies', captured['top_programs'][0]['code'])
+        self.assertIn('def main', captured['current_program'])
 
     def test_unmatched_patch_is_an_error_and_is_not_graded(self):
         unmatched = '<<<<<<< SEARCH\n    not in the program\n=======\n    pass\n>>>>>>> REPLACE'

@@ -32,6 +32,7 @@ def resolved_config(args):
     config["database"]["random_seed"] = args.seed
     # One worker = one request in flight; the worker count is the client batch size.
     config["evaluator"]["parallel_evaluations"] = args.workers
+    config["prompt"]["template_dir"] = str(EXAMPLE_DIR / "prompts")
     # The resolved YAML lives in outputs/, so resolve staging paths explicitly.
     config["evaluator"]["copy_files"] = [
         {str(EXAMPLE_DIR / "data/kpi_search.npz"): "data/kpi_search.npz"}
