@@ -126,4 +126,18 @@ if [[ "${HPML_SKIP_PROFILE:-0}" != "1" ]]; then
     stop_server
 fi
 printf 'complete\n' > "$SUITE/status.txt"
+# One file to download and pass around: summaries, traces, logs and best programs.
+# Checkpoints and per-process raw trace fragments are left out to keep it small.
+(cd "$(dirname "$SUITE")" && python - "$(basename "$SUITE")" <<'PY'
+import sys, zipfile
+from pathlib import Path
+suite = Path(sys.argv[1])
+skip = ('checkpoints', '__pycache__', 'visualizations')
+with zipfile.ZipFile(f'{suite}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted(suite.rglob('*')):
+        if path.is_file() and not any(part in skip for part in path.parts) and not path.name.endswith('.jsonl'):
+            archive.write(path)
+print(f'Shareable archive: {Path.cwd() / (str(suite) + ".zip")}')
+PY
+)
 printf 'Suite results: %s\n' "$SUITE"
